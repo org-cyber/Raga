@@ -14,8 +14,8 @@ type TransactionRequest struct {
 	Currency      string  `json:"currency" binding:"required"`
 	IPAddress     string  `json:"ip_address" binding:"required"`
 	DeviceID      string  `json:"device_id" binding:"required"`
-	SimID         string  `json:"sim_id" binding:"required"`
-	Timestamp     string  `json:"timestamp" binding:"required"`
+	Location      string  `json:"location"`
+	Timestamp     string  `json:"timestamp"`
 }
 
 func AnalyzeTransaction(c *gin.Context) {
@@ -38,17 +38,21 @@ func AnalyzeTransaction(c *gin.Context) {
 		Currency:      req.Currency,
 		IPAddress:     req.IPAddress,
 		DeviceID:      req.DeviceID,
+		Location:      req.Location,
 	})
 
 	// Return structured response
 	c.JSON(200, gin.H{
-		"transaction_id": req.TransactionID,
-		"risk_score":     riskResult.Score,
-		"risk_level":     riskResult.Level,
-		"reasons":        riskResult.Reasons,
-		"ai_confidence":  riskResult.AIConfidence,
-		"ai_summary":     riskResult.AISummary,
-		"message":        "Transaction received successfully",
+		"transaction_id":       req.TransactionID,
+		"risk_score":           riskResult.Score,
+		"risk_level":           riskResult.Level,
+		"reasons":              riskResult.Reasons,
+		"ai_triggered":         riskResult.AITriggered,
+		"ai_confidence":        riskResult.AIConfidence,
+		"ai_recommendation":    riskResult.AIRecommendation,
+		"ai_fraud_probability": riskResult.AIFraudProbability,
+		"ai_summary":           riskResult.AISummary,
+		"message":              "Transaction analyzed successfully",
 	})
 }
 
