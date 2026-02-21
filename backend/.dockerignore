@@ -1,0 +1,25 @@
+# Don't copy these into the build context
+.env
+.git
+.gitignore
+Dockerfile
+.dockerignore
+*.md
+tmp/
+# Windows executables
+*.exe
+*.exe~
+
+# Go build artifacts
+asguard
+main
+
+# Other stuff we already discussed
+.env
+.git
+.gitignore
+Dockerfile
+.dockerignore
+*.md
+.vscode
+.idea
