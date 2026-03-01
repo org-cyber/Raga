@@ -292,4 +292,4 @@ We strongly welcome community contributions! Please read our [CONTRIBUTING.md](C
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE.txt).
+This project is licensed under the [APACHE2.0 License](LICENSE.txt).
