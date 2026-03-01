@@ -40,8 +40,7 @@ Asguard scores transactions using a weighted rule engine and optionally escalate
 - **AI Escalation:** Automatically calls an LLM (Groq AI `llama-3.3-70b-versatile`) for transactions crossing a risk threshold (Score >= 40) for a second opinion.
 - **RESTful API:** Clean, JSON-based API powered by Gin.
 - **API Key Security:** Built-in middleware for endpoint protection.
-- **Firestore Integration:** Ready-to-use persistence layer for transactions and risk profiles.
-- **Dockerized:** Instant local setup via `docker-compose`.
+ - **Dockerized:** Instant local setup via `docker-compose`.
 
  - **API Key Security:** Built-in middleware for endpoint protection.
  - **Dockerized:** Instant local setup via `docker-compose`.
@@ -150,7 +149,6 @@ Asguard is configured entirely via environment variables.
 | --------------------------- | ----------------------------------------------------- | ------- | --------- |
 | `ASGUARD_API_KEY`           | The secret key required by clients to access the API. | None    | Yes       |
 | `GROQ_API_KEY`              | API key for the Groq LLM service.                     | None    | Yes       |
-| `FIREBASE_CREDENTIALS_PATH` | (removed)                                             | -       | No        |
 | `PORT`                      | The port the Gin server will bind to.                 | `8081`  | No        |
 
 ---

@@ -101,7 +101,7 @@ Testing is critical for fraud detection systems. All new features and bug fixes 
   ```bash
   go test ./... -v
   ```
-- Make sure to mock external network calls like the Groq API and Firestore database in unit tests.
+- Make sure to mock external network calls like the Groq API in unit tests.
 
 ---
 
@@ -156,7 +156,7 @@ Maintainers will review your PR, provide constructive feedback, and may request 
 
 ## Security & Secrets
 
-**NEVER** commit API keys, secrets, or your `asguard.json` service account file to the repository. The `.gitignore` is set up to ignore `.env` and `config/asguard.json`, but please double-check your commits.
+**NEVER** commit API keys or any secrets to the repository. The `.gitignore` is set up to ignore `.env` and typical credential files, but please double-check your commits.
 
 ### Reporting Vulnerabilities
 
