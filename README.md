@@ -1,183 +1,297 @@
-# 🛡️ Asguard — AI-Powered Fraud Detection
+# Asguard — AI-Powered Fraud Detection
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg) ![Go](https://img.shields.io/badge/Go-1.25.6-00ADD8.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
-Asguard is a real-time fraud detection engine combining rule-based scoring with AI-enhanced analysis. It provides an API for transaction analysis, a configurable risk engine, and integration points for databases (Firestore) and AI services.
+Asguard is a real-time fraud detection engine combining rule-based scoring with AI-enhanced analysis. It provides an API for transaction analysis and a configurable risk engine with AI integration.
 
-Contents
+## Table of Contents
 
-- Overview
-- Architecture (with diagrams)
-- Quickstart
-- Local development
-- Configuration
-- API reference (high-level)
-- Project layout
-- Testing & CI
-- Contributing
-- License
+- [Overview](#overview)
+- [Key Features](#key-features)
+- [Architecture & Request Flow](#architecture--request-flow)
+- [Prerequisites](#prerequisites)
+- [Quickstart: Local Development](#quickstart-local-development)
+  - [Running with Go](#running-with-go)
+  - [Running with Docker](#running-with-docker)
+- [Configuration Details](#configuration-details)
+- [API Reference](#api-reference)
+- [Project Layout](#project-layout)
+- [Testing & CI](#testing--ci)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
 ## Overview
 
-Asguard scores transactions using a weighted rule engine and optionally escalates higher-risk cases to an AI analysis service. The system is designed to be lightweight, modular, and easy to run locally.
+Asguard scores transactions using a weighted rule engine and optionally escalates higher-risk cases to an AI analysis service. The system is designed to be lightweight, modular, easy to run locally, and highly extensible.
 
-Use cases:
-- Real-time risk scoring for payments
-- Pre-authorization fraud checks
-- Triaging transactions for manual review
+**Primary Use Cases:**
+
+- Real-time risk scoring for payments.
+- Pre-authorization fraud checks.
+- Triaging suspicious transactions for manual review.
 
 ---
 
-## Architecture (high level)
+## Key Features
 
-Mermaid architecture diagram:
+- **Rule-Based Scoring:** Configurable, tiered scoring engine based on transaction amount, currency, device, IP, and location.
+- **AI Escalation:** Automatically calls an LLM (Groq AI `llama-3.3-70b-versatile`) for transactions crossing a risk threshold (Score >= 40) for a second opinion.
+- **RESTful API:** Clean, JSON-based API powered by Gin.
+- **API Key Security:** Built-in middleware for endpoint protection.
+- **Firestore Integration:** Ready-to-use persistence layer for transactions and risk profiles.
+- **Dockerized:** Instant local setup via `docker-compose`.
+
+ - **API Key Security:** Built-in middleware for endpoint protection.
+ - **Dockerized:** Instant local setup via `docker-compose`.
+
+---
+
+## Architecture & Request Flow
+
+Asguard processes incoming transactions through multiple layers, evaluating rules and communicating with external AI only when necessary.
+
+### High-Level Architecture
 
 ```mermaid
 flowchart TD
-  Client[(Client Apps)] -->|HTTP| APIGw["API Gateway\n(Gin)"]
-  APIGw --> MW["Middleware\n(API Key, Validation)"]
-  MW --> Routes["Routes Layer\n/controllers"]
-  Routes --> Services["Services\n(Risk Engine, AI, DB)"]
-  Services --> Risk["Risk Engine\n(rule-based scorer)"]
-  Services --> AI["AI Service\n(optional)"]
-  Services --> DB["Firestore\n(persistence)"]
-  AI -->|optional| ExternalAI["External AI (Groq, etc.)"]
-  DB -->|store| Fire["Firestore"]
+  Client[(Client Apps)] -->|HTTP POST| APIGw["API Gateway\n(Gin)"]
+  APIGw --> MW["Middleware\n(API Key Validation)"]
+  MW --> Routes["Routes Layer\n(/analyze)"]
+  Routes --> Services["Services Layer"]
+
+  subgraph Services Layer
+    Risk["Risk Engine\n(Rule-based Scorer)"]
+    AI["AI Service\n(Groq LLM)"]
+    DB["DB Adapter\n(None - stateless API)"]
+  end
+
+  Services --> Risk
+  Risk -- "If Score >= 40" --> AI
+  AI -->|HTTP| ExternalAI["Groq API\n(llama-3.3-70b)"]
 ```
 
-Component summary:
-- `main.go`: application entry, env loading, router setup
-- `routes/`: HTTP routes and request binding
-- `middleware/`: API key enforcement, validation
-- `services/risk_engine.go`: scoring algorithm
-- `services/ai_service.go`: AI integration point
-- `services/db/firestore.go`: Firestore adapter
+### Request Lifecycle
+
+1. **Validation & Auth:** The `APIKeyAuth` middleware validates the `x-api-key`.
+2. **Data Binding:** The route handler parses the JSON payload.
+3. **Rule Evaluation:** `risk_engine.go` applies weights to transaction properties (Amount, Currency, IP, Device, Location).
+4. **AI Gating:** If the rule-based score is ≥ 40 (MEDIUM or HIGH risk), the `ai_service.go` constructs a strict system prompt and queries the Groq API.
+5. **Final Designation:** The AI's recommendation (`APPROVE`, `REVIEW`, `BLOCK`) can upgrade the final risk level but cannot downgrade a high-risk label generated by the engine.
+6. **Response:** A structured JSON object is returned containing the score, risk level, rule-based reasons, and the AI's detailed summary.
+
+_For an in-depth code walkthrough, please see [ARCHITECTURE.md](ARCHITECTURE.md)._
 
 ---
 
-## Quickstart (local)
+## Prerequisites
 
-Prerequisites:
-- Go 1.25+
-- Git
-- A Firebase project (for Firestore) or set DB to noop for quick dev
+To run Asguard locally, you will need:
 
-Steps:
+- **[Go 1.25+](https://go.dev/dl/)**
+- **[Git](https://git-scm.com/)**
+- **[Docker & Docker Compose](https://www.docker.com/)** (Optional, for containerized local dev)
+- **Groq API Key:** Required for the AI-enhanced analysis. Get one at [console.groq.com](https://console.groq.com/).
+
+ - **Groq API Key:** Required for the AI-enhanced analysis. Get one at [console.groq.com](https://console.groq.com/).
+
+---
+
+## Quickstart: Local Development
+
+### Running with Go
+
+1. **Clone the repository:**
+
+   ```bash
+   git clone <repo-url>
+   cd asguard/backend
+   ```
+
+2. **Download modules:**
+
+   ```bash
+   go mod download
+   ```
+
+3. **Set up environment variables:**
+   Create a `.env` file in the `backend/` directory:
+
+   ```env
+   ASGUARD_API_KEY=super-secret-key
+   GROQ_API_KEY=your_groq_api_key
+   PORT=8081
+   ```
+
+4. **Start the server:**
+   ```bash
+   go run main.go
+   ```
+
+### Running with Docker
+
+A `docker-compose.dev.yml` file is provided that mounts your local directory into the container, allowing hot-reloading (if configured) and isolated execution.
 
 ```bash
-git clone <repo-url>
-cd asguard/backend
-go mod download
-# place your Firebase JSON at backend/config/asguard.json
-export ASGUARD_API_KEY=your_api_key_here
-export FIREBASE_CREDENTIALS_PATH=./config/asguard.json
-go run main.go
+cd backend
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-Health-check:
+_To stop the container gracefully, press `Ctrl+C` or run `docker compose down`._
 
-```bash
-curl http://localhost:8081/health
-# expected: {"status":"asguard health running"}
+---
+
+## Configuration Details
+
+Asguard is configured entirely via environment variables.
+
+| Variable                    | Description                                           | Default | Required? |
+| --------------------------- | ----------------------------------------------------- | ------- | --------- |
+| `ASGUARD_API_KEY`           | The secret key required by clients to access the API. | None    | Yes       |
+| `GROQ_API_KEY`              | API key for the Groq LLM service.                     | None    | Yes       |
+| `FIREBASE_CREDENTIALS_PATH` | (removed)                                             | -       | No        |
+| `PORT`                      | The port the Gin server will bind to.                 | `8081`  | No        |
+
+---
+
+## API Reference
+
+### 1. Health Check
+
+Checks if the API is running. No authentication required.
+
+**HTTP Request:**
+
+```http
+GET http://localhost:8081/health
+```
+
+**Response:**
+
+```json
+{
+  "status": "asguard health running"
+}
+```
+
+### 2. Analyze Transaction
+
+Analyzes a payload and returns a calculated risk score and AI analysis.
+
+**HTTP Request:**
+
+```http
+POST http://localhost:8081/analyze
+```
+
+**Headers:**
+
+- `Content-Type: application/json`
+- `x-api-key: <ASGUARD_API_KEY>`
+
+**Request Body:**
+
+```json
+{
+  "user_id": "user_123",
+  "transaction_id": "txn_456",
+  "amount": 250000,
+  "currency": "USD",
+  "ip_address": "192.168.1.5",
+  "device_id": "device_789",
+  "location": "Lagos, Nigeria"
+}
+```
+
+**Response:**
+
+```json
+{
+  "transaction_id": "txn_456",
+  "risk_score": 41,
+  "risk_level": "MEDIUM",
+  "reasons": [
+    "High transaction amount (>100k)",
+    "Foreign currency transaction (USD)",
+    "AI recommends REVIEW: Large USD transaction from Lagos warrants manual review"
+  ],
+  "ai_triggered": true,
+  "ai_confidence": 0.85,
+  "ai_recommendation": "REVIEW",
+  "ai_fraud_probability": 0.45,
+  "ai_summary": "Large USD transaction from Lagos warrants manual review",
+  "message": "Transaction analyzed successfully"
+}
 ```
 
 ---
 
-## Local development
+## Project Layout
 
-- Use `go run main.go` during development.
-- To build a binary: `go build -o asguard.exe`.
-- Keep `backend/config/asguard.json` secure — do not commit credentials.
-
-Project structure (backend-focused):
-
-- backend/
-  - main.go
-  - routes/
-  - middleware/
-  - services/
-    - ai_service.go
-    - risk_engine.go
-    - db/firestore.go
-  - config/
-    - asguard.json (gitignored)
-
----
-
-## Configuration
-
-Required environment variables:
-
-- `ASGUARD_API_KEY` — API key for protected endpoints
-- `FIREBASE_CREDENTIALS_PATH` — path to the service account JSON
-- `PORT` — optional, defaults to `8081`
-
-Example `.env` (backend/):
-
-```env
-ASGUARD_API_KEY=super-secret-key
-FIREBASE_CREDENTIALS_PATH=./config/asguard.json
-PORT=8081
+```text
+backend/
+├── main.go                    # Application entry point, router setup
+├── .env                       # Environment secrets (ignored in git)
+├── .dockerignore              # Docker build exclusions
+├── Dockerfile                 # Production Docker build instructions
+├── docker-compose.dev.yml     # Local docker development configuration
+├── config/                    # optional config folder (do not store secrets)
+├── middleware/
+│   └── apikey.go              # Verification middleware for x-api-key
+├── routes/
+│   └── routes.go              # Endpoint definitions and request binding
+└── services/
+    ├── ai_service.go          # Groq integration and LLM handling
+    ├── risk_engine.go         # Core logic and weighted rule calculations
+    └── db/
+      └── (none)             # stateless API; persistence removed
 ```
-
----
-
-## API (high level)
-
-Base URL: `http://localhost:8081`
-
-- `GET /health` — service health
-- `POST /analyze` — submit a transaction for scoring (requires `x-api-key` header)
-
-Authentication: provide `x-api-key` header for protected endpoints.
-
-Request/response examples are in the `routes/` handlers — inspect [backend/routes/routes.go](backend/routes/routes.go) to see exact bindings.
 
 ---
 
 ## Testing & CI
 
-- Unit tests: add tests alongside packages — e.g., `services/risk_engine_test.go`.
-- Run: `go test ./...`
-- Lint/format: `gofmt -w .` and consider `golangci-lint` in CI.
+### Running Tests Locally
 
-### CI
-
-A minimal GitHub Actions workflow is included at `.github/workflows/ci.yml` to run tests, `gofmt` and `go vet` on pushes and pull requests. Adjust the workflow to add linters or caching as needed.
-
-### Dev Docker
-
-A `docker-compose.dev.yml` is provided for local development. It builds the `backend` service and mounts the source so you can iterate without rebuilding the image repeatedly. Example:
+To run the full unit test suite:
 
 ```bash
-docker compose -f docker-compose.dev.yml up --build
+cd backend
+go test ./... -v
 ```
 
-Stop it with `docker compose down`.
+### Linting & Formatting
+
+Ensure your code is properly formatted before committing:
+
+```bash
+gofmt -w .
+```
+
+### CI Pipeline
+
+The repository includes a GitHub Actions workflow (`.github/workflows/ci.yml`) that automatically runs on pushes and Pull Requests to the main branch. It verifies:
+
+- Go formatting (`gofmt`)
+- Static analysis (`go vet`)
+- Test completeness (`go test`)
 
 ---
 
 ## Contributing
 
-We welcome contributions. See [CONTRIBUTING.md](CONTRIBUTING.md) for full guidelines.
+We strongly welcome community contributions! Please read our [CONTRIBUTING.md](CONTRIBUTING.md) for detailed instructions on the development workflow, branching strategies, and testing guidelines.
 
-Short checklist:
-- Open an issue to discuss non-trivial changes
-- Create a feature branch named `feat/your-feature` or `fix/issue-123`
-- Keep commits small and focused
-- Run `go test ./...` and linters locally before PR
+**Quick Checklist:**
 
----
-
-## Troubleshooting
-
-- If Firestore auth fails: verify `FIREBASE_CREDENTIALS_PATH` and the JSON contents
-- If routes return 401: check `ASGUARD_API_KEY` header value
+- Open an Issue first to discuss large changes.
+- Branch off `main` using the format `feat/feature-name` or `fix/bug-name`.
+- Ensure all tests pass (`go test ./...`).
+- Submit a Pull Request with a clear description.
 
 ---
 
 ## License
 
-This project is MIT licensed. See LICENSE for details.
+This project is licensed under the [MIT License](LICENSE.txt).

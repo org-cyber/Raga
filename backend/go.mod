@@ -3,8 +3,6 @@ module asguard
 go 1.24.0
 
 require (
-	cloud.google.com/go/firestore v1.21.0
-	firebase.google.com/go v3.13.0+incompatible
 	github.com/gin-gonic/gin v1.11.0
 	github.com/joho/godotenv v1.5.1
 	google.golang.org/api v0.256.0

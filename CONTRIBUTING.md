@@ -1,59 +1,169 @@
 # Contributing to Asguard
 
-Thank you for your interest in contributing to Asguard! This document explains how to propose changes, run tests, and follow the project's conventions.
+Thank you for your interest in contributing to Asguard! This document explains how to propose changes, set up your development environment, run tests, and follow the project's conventions. Our goal is to make the contribution process as smooth and transparent as possible.
 
 ## Code of Conduct
 
-Be respectful, professional, and collaborative. Treat maintainers and contributors with kindness.
+By participating in this project, you agree to abide by our Code of Conduct:
 
-## How to contribute
+- Be respectful, professional, and collaborative.
+- Treat maintainers and contributors with kindness.
+- Welcome newcomers and encourage dialogue.
+- Harassment or unacceptable behavior will not be tolerated.
 
-1. Fork the repository and clone your fork.
-2. Create a branch for your change:
+---
 
-   - Features: `feat/<short-description>`
-   - Fixes: `fix/<issue-number-or-short-desc>`
+## How to Contribute
 
-3. Make small, focused commits. Use imperative commit messages like "Add input validation for amount".
-4. Run tests and linters locally.
-5. Open a pull request against the main branch with a clear description and link any related issues.
+We welcome all types of contributions: bug fixes, new features, documentation improvements, and architectural suggestions.
 
-## Development setup
+### 1. Discuss Before You Build
 
-From the repository root:
+For significant changes, architectural updates, or adding large new dependencies, please **open an issue** to discuss your ideas first. This ensures your work aligns with the project's direction and prevents wasted effort.
+
+### 2. Fork & Clone
+
+1. Fork the repository to your own GitHub account.
+2. Clone your fork locally:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/asguard.git
+   cd asguard/backend
+   ```
+3. Set up the upstream remote to stay up-to-date:
+   ```bash
+   git remote add upstream https://github.com/ORIGINAL_OWNER/asguard.git
+   ```
+
+### 3. Branch Naming Strategy
+
+Create a new branch for your work. Use the following convention to categorize your changes:
+
+- **Features:** `feat/<short-description>` (e.g., `feat/add-stripe-webhook`)
+- **Bug Fixes:** `fix/<issue-number-or-short-desc>` (e.g., `fix/132-nil-pointer-deref`)
+- **Documentation:** `docs/<short-description>` (e.g., `docs/update-readme-api`)
+- **Refactoring:** `refactor/<short-description>` (e.g., `refactor/extract-ai-logic`)
 
 ```bash
-cd backend
-go mod download
-go test ./...
+git checkout -b feat/add-stripe-webhook
 ```
 
-If you use Firestore locally, set `FIREBASE_CREDENTIALS_PATH` to a test service account JSON or mock calls.
+---
 
-## Testing
+## Development Setup
 
-- Write unit tests using Go's `testing` package.
-- Place tests next to the package they validate (e.g., `services/risk_engine_test.go`).
-- Run the full test suite with `go test ./...`.
+The project relies heavily on Go and optionally Docker for local development.
 
-## Style and linting
+### Prerequisites
 
-- Format code with `gofmt` or `gofmt -w .` before committing.
-- Follow Go idioms; prefer clear, small functions.
+- Go 1.25 or newer
+- Docker & Docker Compose (optional but recommended)
 
-## Pull Request checklist
+### Local Go Setup
 
-- [ ] Tests added/updated for new behavior
-- [ ] Code formatted (`gofmt`)
-- [ ] Linter warnings addressed (if applicable)
-- [ ] PR description explains motivation and approach
+1. Navigate to the `backend` directory.
+2. Install dependencies:
+   ```bash
+   go mod download
+   ```
+3. Copy environment variables:
+   Create a `.env` file in the `backend/` directory by copying the example or using the following keys:
+   ```env
+   ASGUARD_API_KEY=test_api_key_123
+   GROQ_API_KEY=test_groq_key_123
+   PORT=8081
+   ```
+4. The project is a stateless fraud-detection API by default. If you need persistence for a custom deployment, implement an external adapter and mock it in tests.
 
-## Security & secrets
+5. Run the server:
+   ```bash
+   go run main.go
+   ```
 
-Never commit credentials or service account JSON to the repository. Use `backend/config/asguard.json` locally, but add the file to `.gitignore`.
+### Docker Setup
 
-If you find a security vulnerability, please open a private issue and tag maintainers; do not disclose publicly until fixed.
+For an isolated environment, run:
 
-## Questions
+```bash
+docker compose -f docker-compose.dev.yml up --build
+```
 
-If you're unsure about an approach, open an issue describing the change you want to make—maintainers will help shape the work.
+This mounts the local directory into the container.
+
+---
+
+## Testing Guidelines
+
+Testing is critical for fraud detection systems. All new features and bug fixes must include tests.
+
+- **Unit Tests:** Write tests using Go's built-in `testing` package.
+- **Location:** Place tests next to the package they validate (e.g., `services/risk_engine_test.go`).
+- **Running Tests:**
+  ```bash
+  go test ./... -v
+  ```
+- Make sure to mock external network calls like the Groq API and Firestore database in unit tests.
+
+---
+
+## Style and Linting
+
+- **Formatting:** Always format your code with `gofmt` before committing.
+  ```bash
+  gofmt -w .
+  ```
+- **Idiomatic Go:** Follow standard Go idioms. Prefer clear, small functions with explicit error handling. Avoid panics.
+- **Linters:** (Optional but encouraged) Run `golangci-lint run` locally to catch potential issues early.
+
+---
+
+## Commit Conventions
+
+We encourage the use of [Conventional Commits](https://www.conventionalcommits.org/). This allows us to auto-generate changelogs in the future.
+
+**Format:** `<type>(<scope>): <subject>`
+
+**Examples:**
+
+- `feat(api): add endpoint for batch transactions`
+- `fix(ai): handle rate limit 429 response gracefully`
+- `docs(readme): update quickstart section`
+- `test(risk): add boundary tests for amount tiering`
+
+Keep commits small, logical, and focused on a single change.
+
+---
+
+## Pull Request Process
+
+When you are ready to submit your code:
+
+1. Push your branch to your fork:
+   ```bash
+   git push origin feat/your-feature
+   ```
+2. Open a Pull Request against the `main` branch of the original repository.
+3. **PR Checklist:** Ensure the following items are met before submitting:
+   - [ ] All local tests pass (`go test ./...`).
+   - [ ] Code is formatted (`gofmt -w .`).
+   - [ ] New functionality is covered by tests.
+   - [ ] Documentation (README / ARCHITECTURE) is updated if applicable.
+   - [ ] The PR description clearly explains the _motivation_ and _approach_.
+   - [ ] Any related issues are linked (e.g., `Closes #123`).
+
+Maintainers will review your PR, provide constructive feedback, and may request changes. Once approved and CI passes, your PR will be merged!
+
+---
+
+## Security & Secrets
+
+**NEVER** commit API keys, secrets, or your `asguard.json` service account file to the repository. The `.gitignore` is set up to ignore `.env` and `config/asguard.json`, but please double-check your commits.
+
+### Reporting Vulnerabilities
+
+If you discover a security vulnerability, please do **NOT** open a public issue. Instead, reach out to the core maintainers privately. Once a patch is developed and deployed, a public disclosure will be made.
+
+---
+
+## Questions?
+
+If you're unsure about an approach, stuck on a bug, or just want to ask a question, please open an Issue. The maintainers and the community are happy to help guide you!
