@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - ASGUARD_API_KEY=devsecret
+      - FIREBASE_CREDENTIALS_PATH=/app/config/asguard.json
+      - PORT=8081
+    volumes:
+      - ./backend:/app
+      - ./backend/config:/app/config
+    command: ["go", "run", "main.go"]

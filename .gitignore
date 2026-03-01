@@ -1,0 +1,23 @@
+# Binaries
+/backend/asguard.exe
+/asguard.exe
+*.exe
+
+# Environment
+/backend/.env
+.env
+
+# Configs (don't commit secrets)
+/backend/config/asguard.json
+config/asguard.json
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.DS_Store
+
+# Go
+vendor/
+bin/
+*.test
