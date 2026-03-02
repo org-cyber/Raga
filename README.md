@@ -1,4 +1,4 @@
-# Asguard — AI-Powered Fraud Detection
+# C:\Users\SOOQ ELASER\asguard\Gemini_Generated_Image_2r9uh62r9uh62r9u-removebg-preview (1).png Asguard — AI-Powered Fraud Detection
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg) ![Go](https://img.shields.io/badge/Go-1.25.6-00ADD8.svg) ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
