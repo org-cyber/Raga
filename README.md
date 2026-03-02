@@ -1,4 +1,4 @@
-![Logo](<Gemini_Generated_Image_2r9uh62r9uh62r9u-removebg-preview (1).png>)
+<img src="Gemini_Generated_Image_2r9uh62r9uh62r9u-removebg-preview (1).png" width="300">
 
 # Asguard — AI-Powered Fraud Detection
 
