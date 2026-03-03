@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Asguard Face Verification Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .upload-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .image-box {
+            border: 2px dashed #ccc;
+            padding: 20px;
+            text-align: center;
+            border-radius: 4px;
+        }
+        .image-box img {
+            max-width: 100%;
+            max-height: 200px;
+            margin-top: 10px;
+        }
+        input[type="file"] {
+            margin-top: 10px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .results {
+            margin-top: 20px;
+            padding: 20px;
+            border-radius: 4px;
+            display: none;
+        }
+        .match {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .no-match {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .error {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            margin: 10px 0;
+            padding: 8px;
+            background: rgba(255,255,255,0.5);
+            border-radius: 4px;
+        }
+        .loading {
+            text-align: center;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔐 Asguard Face Verification</h1>
+    
+    <div class="container">
+        <div class="upload-section">
+            <div class="image-box">
+                <h3>Reference Image</h3>
+                <input type="file" id="refImage" accept="image/*" onchange="previewImage(this, 'refPreview')">
+                <img id="refPreview" style="display:none;">
+            </div>
+            
+            <div class="image-box">
+                <h3>Probe Image</h3>
+                <input type="file" id="probeImage" accept="image/*" onchange="previewImage(this, 'probePreview')">
+                <img id="probePreview" style="display:none;">
+            </div>
+        </div>
+        
+        <button id="compareBtn" onclick="compareFaces()">Compare Faces</button>
+        
+        <div id="loading" class="loading" style="display:none;">
+            <p>Processing... ⏳</p>
+        </div>
+        
+        <div id="results" class="results">
+            <h3 id="resultTitle"></h3>
+            <div id="resultDetails"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8082';
+        const API_KEY = 'dev-key-123';
+
+        function previewImage(input, previewId) {
+            const preview = document.getElementById(previewId);
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    preview.src = e.target.result;
+                    preview.style.display = 'block';
+                };
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    // Remove data URL prefix
+                    const base64 = reader.result.split(',')[1];
+                    resolve(base64);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function compareFaces() {
+            const refFile = document.getElementById('refImage').files[0];
+            const probeFile = document.getElementById('probeImage').files[0];
+            
+            if (!refFile || !probeFile) {
+                alert('Please select both images');
+                return;
+            }
+
+            const btn = document.getElementById('compareBtn');
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+            
+            btn.disabled = true;
+            loading.style.display = 'block';
+            results.style.display = 'none';
+
+            try {
+                // Step 1: Get embedding from reference image
+                const refBase64 = await fileToBase64(refFile);
+                
+                const analyzeResponse = await fetch(`${API_URL}/v1/analyze`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${API_KEY}`
+                    },
+                    body: JSON.stringify({
+                        image: refBase64,
+                        quality_checks: true
+                    })
+                });
+                
+                const analyzeResult = await analyzeResponse.json();
+                
+                if (!analyzeResult.success) {
+                    throw new Error(`Reference image: ${analyzeResult.error}`);
+                }
+
+                // Step 2: Compare with probe image
+                const probeBase64 = await fileToBase64(probeFile);
+                
+                const compareResponse = await fetch(`${API_URL}/v1/compare`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${API_KEY}`
+                    },
+                    body: JSON.stringify({
+                        probe_image: probeBase64,
+                        reference_embedding: analyzeResult.embedding,
+                        threshold: 0.6
+                    })
+                });
+                
+                const compareResult = await compareResponse.json();
+                displayResults(compareResult, analyzeResult);
+                
+            } catch (error) {
+                displayError(error.message);
+            } finally {
+                btn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        function displayResults(compareResult, analyzeResult) {
+            const results = document.getElementById('results');
+            const title = document.getElementById('resultTitle');
+            const details = document.getElementById('resultDetails');
+            
+            results.style.display = 'block';
+            
+            if (compareResult.match) {
+                results.className = 'results match';
+                title.textContent = '✅ SAME PERSON DETECTED';
+            } else {
+                results.className = 'results no-match';
+                title.textContent = '❌ DIFFERENT PEOPLE';
+            }
+            
+            details.innerHTML = `
+                <div class="metric">
+                    <span>Confidence:</span>
+                    <strong>${(compareResult.confidence * 100).toFixed(1)}%</strong>
+                </div>
+                <div class="metric">
+                    <span>Distance:</span>
+                    <strong>${compareResult.distance.toFixed(3)}</strong>
+                </div>
+                <div class="metric">
+                    <span>Threshold:</span>
+                    <strong>${compareResult.threshold_used}</strong>
+                </div>
+                <div class="metric">
+                    <span>Processing Time:</span>
+                    <strong>${compareResult.processing_time_ms}ms</strong>
+                </div>
+                <hr style="margin: 15px 0; border: none; border-top: 1px solid #ddd;">
+                <h4>Reference Image Quality:</h4>
+                <div class="metric">
+                    <span>Quality Score:</span>
+                    <strong>${(analyzeResult.quality_score * 100).toFixed(1)}%</strong>
+                </div>
+                <div class="metric">
+                    <span>Brightness:</span>
+                    <strong>${analyzeResult.brightness.toFixed(1)}</strong>
+                </div>
+                <div class="metric">
+                    <span>Face Size:</span>
+                    <strong>${(analyzeResult.face_size_ratio * 100).toFixed(1)}%</strong>
+                </div>
+                ${analyzeResult.warnings.length > 0 ? `
+                <div class="metric" style="color: #856404;">
+                    <span>Warnings:</span>
+                    <strong>${analyzeResult.warnings.join(', ')}</strong>
+                </div>
+                ` : ''}
+            `;
+        }
+
+        function displayError(message) {
+            const results = document.getElementById('results');
+            const title = document.getElementById('resultTitle');
+            const details = document.getElementById('resultDetails');
+            
+            results.style.display = 'block';
+            results.className = 'results error';
+            title.textContent = '⚠️ Error';
+            details.innerHTML = `<p>${message}</p>`;
+        }
+    </script>
+</body>
+</html>

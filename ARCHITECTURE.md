@@ -1,188 +1,216 @@
-# Asguard Backend — Architecture, Code Walkthrough & Change Log
+# Asguard — Architecture, Code Walkthrough & Change Log
 
-> **Last updated:** 2026-02-18  
-> This document explains how the project works, how every part communicates, what bugs were fixed, and what improvements were made — with code snippets throughout.
+> **Last updated:** 2026-03-03
+> This document explains how every part of the Asguard platform works, how services communicate, what was built and why, and all notable changes made throughout development — with code snippets throughout.
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
-2. [Folder Structure](#2-folder-structure)
-3. [How a Request Flows Through the System](#3-how-a-request-flows-through-the-system)
-4. [File-by-File Breakdown](#4-file-by-file-breakdown)
-   - [main.go](#41-maingo--the-entry-point)
-   - [middleware/apikey.go](#42-middlewareapikeygo--the-security-gate)
-   - [routes/routes.go](#43-routesroutesgo--the-http-layer)
-   - [services/risk_engine.go](#44-servicesrisk_enginego--the-scoring-brain)
-   - [services/ai_service.go](#45-servicesai_servicego--the-groq-ai-integration)
-5. [Bugs Found and Fixed](#5-bugs-found-and-fixed)
-   - [Bug 1 — 400 Bad Request on /analyze](#bug-1--400-bad-request-on-analyze)
-   - [Bug 2 — Location field silently dropped](#bug-2--location-field-silently-dropped)
-   - [Bug 3 — Scoring weights exceeded 100%](#bug-3--scoring-weights-exceeded-100)
-   - [Bug 4 — Deprecated Groq model](#bug-4--deprecated-groq-model)
-   - [Bug 5 — AI errors were silently swallowed](#bug-5--ai-errors-were-silently-swallowed)
-6. [Improvements Made](#6-improvements-made)
-   - [Tiered Amount Scoring](#tiered-amount-scoring)
-   - [AI Gate Lowered to 40](#ai-gate-lowered-to-40)
-   - [AI Can Influence Final Risk Level](#ai-can-influence-final-risk-level)
-   - [Structured Prompting with System + User Roles](#structured-prompting-with-system--user-roles)
-   - [Markdown Fence Stripping](#markdown-fence-stripping)
-   - [Full AI Fields Exposed in API Response](#full-ai-fields-exposed-in-api-response)
-7. [How to Test the API](#7-how-to-test-the-api)
+2. [System Architecture](#2-system-architecture)
+3. [Folder Structure](#3-folder-structure)
+4. [Backend Service — Deep Dive](#4-backend-service--deep-dive)
+   - [main.go](#41-maingo)
+   - [middleware/apikey.go](#42-middlewareapikeygo)
+   - [routes/routes.go](#43-routesroutesgo)
+   - [services/risk_engine.go](#44-servicesrisk_enginego)
+   - [services/ai_service.go](#45-servicesai_servicego)
+5. [Face Service — Deep Dive](#5-face-service--deep-dive)
+   - [Overview & Startup](#51-overview--startup)
+   - [CORS Middleware](#52-cors-middleware-new-2026-03-03)
+   - [Auth Middleware](#53-auth-middleware)
+   - [Request ID Middleware](#54-request-id-middleware)
+   - [Routes](#55-routes)
+   - [handleAnalyze — Embedding Extraction](#56-handleanalyze--embedding-extraction)
+   - [handleCompare — Face Similarity](#57-handlecompare--face-similarity)
+   - [Image Quality Scoring](#58-image-quality-scoring)
+6. [Dockerfile — Multi-Stage Build](#6-dockerfile--multi-stage-build-new-2026-03-03)
+7. [Docker Compose — Multi-Service Orchestration](#7-docker-compose--multi-service-orchestration)
+8. [Backend — Bugs Fixed & Improvements](#8-backend--bugs-fixed--improvements)
+9. [Face Service — Changes on 2026-03-03](#9-face-service--changes-on-2026-03-03)
+10. [How to Test Both APIs](#10-how-to-test-both-apis)
 
 ---
 
 ## 1. Project Overview
 
-**Asguard** is a fraud detection backend API built in Go. When a financial transaction comes in, the system:
+**Asguard** is a fraud detection and identity verification platform built in Go. It operates as two independent microservices:
 
-1. Validates the request and checks the caller's API key
-2. Runs a **rule-based scoring engine** that assigns a risk score (0–100)
-3. If the score is high enough (≥ 40), calls **Groq AI** (an LLM) for a second opinion
-4. Returns a structured JSON response with the score, risk level, reasons, and AI analysis
+| Service        | Port | Responsibility                                             |
+| -------------- | ---- | ---------------------------------------------------------- |
+| `backend`      | 8081 | Transaction risk scoring (rule-based + Groq LLM)           |
+| `asguard-face` | 8082 | Biometric face recognition (dlib embeddings via `go-face`) |
 
-The stack is:
+The two services are orchestrated together by `docker-compose.yml` at the project root and communicate on a shared Docker bridge network (`asguard-network`).
 
-- **Go** — language
-- **Gin** — HTTP web framework
-- **Groq API** — LLM provider (using `llama-3.3-70b-versatile`)
-- **godotenv** — loads `.env` secrets at startup
+### Tech Stack
 
----
-
-## 2. Folder Structure
-
-```
-backend/
-├── main.go                    ← Entry point. Starts the server.
-├── .env                       ← Secret keys (never commit this to git)
-├── middleware/
-│   └── apikey.go              ← API key authentication middleware
-├── routes/
-│   └── routes.go              ← HTTP route definitions and request handling
-└── services/
-    ├── risk_engine.go         ← Rule-based scoring logic + AI gate
-    └── ai_service.go          ← Groq AI HTTP client
-```
+| Layer          | Backend                 | Face Service                      |
+| -------------- | ----------------------- | --------------------------------- |
+| Language       | Go 1.25                 | Go 1.25                           |
+| HTTP Framework | Gin                     | Gin                               |
+| Auth           | x-api-key middleware    | Bearer token middleware           |
+| CORS           | —                       | `gin-contrib/cors`                |
+| AI / ML        | Groq API (LLM)          | dlib via `go-face` (CNN)          |
+| Tracing        | —                       | UUID per-request (`X-Request-ID`) |
+| Container      | Single-stage Dockerfile | **Multi-stage Dockerfile**        |
 
 ---
 
-## 3. How a Request Flows Through the System
+## 2. System Architecture
 
-Here is the full journey of a single `POST /analyze` request:
+### Platform-Level Diagram
 
 ```
-Client (Postman / Frontend)
-        │
-        │  POST /analyze
-        │  Header: x-api-key: supersecret123
-        │  Body: { "user_id": ..., "amount": 250000, ... }
-        ▼
-┌─────────────────────────────┐
-│       main.go               │  ← Starts Gin, loads .env, registers routes
-└────────────┬────────────────┘
-             │
-             ▼
-┌─────────────────────────────┐
-│  middleware/apikey.go       │  ← Checks x-api-key header
-│  APIKeyAuth()               │    If wrong/missing → 401 Unauthorized
-└────────────┬────────────────┘
-             │  (key is valid, continue)
-             ▼
-┌─────────────────────────────┐
-│  routes/routes.go           │  ← Parses + validates JSON body
-│  AnalyzeTransaction()       │    If missing required fields → 400 Bad Request
-└────────────┬────────────────┘
-             │  (request is valid)
-             ▼
-┌─────────────────────────────┐
-│  services/risk_engine.go    │  ← Runs 5 weighted rules → score 0–100
-│  CalculateRisk()            │    Determines risk level: LOW / MEDIUM / HIGH
-└────────────┬────────────────┘
-             │  (if score >= 40)
-             ▼
-┌─────────────────────────────┐
-│  services/ai_service.go     │  ← Calls Groq API with transaction details
-│  AnalyzeTransaction()       │    Gets back: fraud_probability, action, reasoning
-└────────────┬────────────────┘
-             │
-             ▼
-        JSON Response
-        { risk_score, risk_level, ai_recommendation, ... }
+┌──────────────────────────────────────────────────────────────────┐
+│                        Client Applications                        │
+│              (Web Frontend / Mobile SDK / Other Services)         │
+└───────┬───────────────────────────────────────┬──────────────────┘
+        │                                       │
+        │  POST /analyze                        │  POST /v1/analyze
+        │  x-api-key: <key>                     │  POST /v1/compare
+        │                                       │  Authorization: Bearer <key>
+        ▼                                       ▼
+┌───────────────────────┐             ┌──────────────────────────────┐
+│   backend             │             │   asguard-face               │
+│   Port 8081           │             │   Port 8082                  │
+│                       │             │                              │
+│  ┌─────────────────┐  │             │  ┌────────────────────────┐  │
+│  │ APIKeyAuth      │  │             │  │ CORS Middleware         │  │
+│  │ Middleware      │  │             │  │ (gin-contrib/cors)      │  │
+│  └────────┬────────┘  │             │  └────────────┬───────────┘  │
+│           │           │             │               │              │
+│  ┌────────▼────────┐  │             │  ┌────────────▼───────────┐  │
+│  │ Risk Engine     │  │             │  │ Auth Middleware         │  │
+│  │ (Rule-based)    │  │             │  │ (Bearer Token)         │  │
+│  └────────┬────────┘  │             │  └────────────┬───────────┘  │
+│           │           │             │               │              │
+│  ┌────────▼────────┐  │             │  ┌────────────▼───────────┐  │
+│  │  AI Gate        │  │             │  │ Request ID Middleware   │  │
+│  │  (Score >= 40)  │  │             │  │ (UUID per request)     │  │
+│  └────────┬────────┘  │             │  └────────────┬───────────┘  │
+│           │           │             │               │              │
+└───────────┼───────────┘             │  ┌────────────▼───────────┐  │
+            │                        │  │ go-face Recognizer      │  │
+            ▼                        │  │ (dlib, 128D embeddings)  │  │
+     Groq API (LLM)                  │  └────────────────────────┘  │
+     llama-3.3-70b                   └──────────────────────────────┘
+```
+
+### Docker Network Topology
+
+```
+  docker-compose.yml
+  ┌──────────────────────────────────────────┐
+  │  asguard-network (bridge)                │
+  │                                          │
+  │   ┌──────────────┐  ┌─────────────────┐  │
+  │   │  backend     │  │  asguard-face   │  │
+  │   │  :8081       │  │  :8082          │  │
+  │   └──────────────┘  └─────────────────┘  │
+  │                           │              │
+  │                    volume: ./models      │
+  │                           (read-only)   │
+  └──────────────────────────────────────────┘
 ```
 
 ---
 
-## 4. File-by-File Breakdown
+## 3. Folder Structure
 
-### 4.1 `main.go` — The Entry Point
+```
+asguard/
+├── README.md
+├── ARCHITECTURE.md                 ← This file
+├── CONTRIBUTING.md
+├── docker-compose.yml              ← Orchestrates backend + asguard-face
+├── models/                         ← dlib model files (shared volume, not committed)
+│   ├── shape_predictor_5_face_landmarks.dat
+│   ├── dlib_face_recognition_resnet_model_v1.dat
+│   └── mmod_human_face_detector.dat
+│
+├── backend/                        ← Transaction risk service
+│   ├── main.go
+│   ├── Dockerfile
+│   ├── middleware/
+│   │   └── apikey.go
+│   ├── routes/
+│   │   └── routes.go
+│   └── services/
+│       ├── ai_service.go
+│       └── risk_engine.go
+│
+└── asguard-face/                   ← Face recognition microservice
+    ├── main.go                     ← All-in-one: server, handlers, middleware, helpers
+    ├── Dockerfile                  ← Multi-stage build
+    ├── go.mod
+    └── go.sum
+```
 
-This is where the application boots. It does three things:
+---
+
+## 4. Backend Service — Deep Dive
+
+### 4.1 `main.go`
+
+The backend entry point does three things:
 
 ```go
 func main() {
-    // 1. Load .env file so os.Getenv("GROQ_API_KEY") works everywhere
+    // 1. Load .env so os.Getenv("GROQ_API_KEY") works everywhere
     if err := godotenv.Load(); err != nil {
         log.Fatalf("Error loading .env file: %v", err)
     }
 
-    // 2. Create the Gin HTTP router
+    // 2. Create Gin router
     router := gin.Default()
 
-    // 3. Register all routes (health check + /analyze)
+    // 3. Register routes (health check + /analyze)
     routes.RegisterRoutes(router)
 
-    // 4. Start listening on port 8081
+    // 4. Listen on port 8081
     router.Run(":8081")
 }
 ```
 
-**Key point:** `godotenv.Load()` must run before anything else, because `ai_service.go` reads `GROQ_API_KEY` from the environment. If this fails, the whole app crashes intentionally — you don't want to run without secrets.
+`godotenv.Load()` must run first — `ai_service.go` reads `GROQ_API_KEY` at call time. A missing key causes an intentional fatal crash rather than a silent failure.
 
 ---
 
-### 4.2 `middleware/apikey.go` — The Security Gate
+### 4.2 `middleware/apikey.go`
 
-Every protected route passes through this middleware before the handler runs. It reads the `x-api-key` header and compares it to the value stored in `.env`.
+Every protected route passes through this gate. It reads the `x-api-key` header and compares against the value stored in `.env`:
 
 ```go
 func APIKeyAuth() gin.HandlerFunc {
     return func(c *gin.Context) {
-        apikey := c.GetHeader("x-api-key")         // read from request header
-        expectedKey := os.Getenv("ASGUARD_API_KEY") // read from .env
+        apikey := c.GetHeader("x-api-key")
+        expectedKey := os.Getenv("ASGUARD_API_KEY")
 
         if apikey == "" || apikey != expectedKey {
             c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorised"})
-            c.Abort() // ← stops the request here, handler never runs
+            c.Abort() // stops the chain — handler never runs
             return
         }
-
-        c.Next() // ← key is valid, pass through to the route handler
+        c.Next()
     }
 }
 ```
 
-**How it connects:** In `routes.go`, this middleware is attached to a route group:
+**How it connects:** In `routes.go`, the middleware wraps a route group so all endpoints under it are protected automatically:
 
 ```go
 protected := router.Group("/")
-protected.Use(middleware.APIKeyAuth()) // ← applied to all routes in this group
+protected.Use(middleware.APIKeyAuth())
 protected.POST("/analyze", AnalyzeTransaction)
 ```
 
-So the middleware runs **before** `AnalyzeTransaction`. If the key is wrong, the request never reaches the handler.
-
 ---
 
-### 4.3 `routes/routes.go` — The HTTP Layer
+### 4.3 `routes/routes.go`
 
-This file has two jobs:
-
-1. **Define the shape of incoming requests** via `TransactionRequest`
-2. **Handle the request** — validate it, call the service, return the response
-
-#### The Request Struct
+Defines the shape of the incoming request and handles parsing/response:
 
 ```go
 type TransactionRequest struct {
@@ -197,376 +225,34 @@ type TransactionRequest struct {
 }
 ```
 
-The `binding:"required"` tag tells Gin to reject the request with a 400 if that field is missing from the JSON body. Fields without it are optional.
+`binding:"required"` causes Gin to reject with HTTP 400 if a field is absent. Fields without it are silently optional.
 
-#### The Handler
+The handler itself does **no business logic** — it only marshals HTTP concerns and delegates to `services/`:
 
 ```go
 func AnalyzeTransaction(c *gin.Context) {
     var req TransactionRequest
-
-    // Try to parse the JSON body into the struct
     if err := c.ShouldBindJSON(&req); err != nil {
         c.JSON(400, gin.H{"error": "invalid request payload"})
         return
     }
-
-    // Pass the validated data to the service layer
-    riskResult := services.CalculateRisk(services.TransactionData{
-        UserID:        req.UserID,
-        TransactionID: req.TransactionID,
-        Amount:        req.Amount,
-        Currency:      req.Currency,
-        IPAddress:     req.IPAddress,
-        DeviceID:      req.DeviceID,
-        Location:      req.Location,
-    })
-
-    // Return the full result to the caller
-    c.JSON(200, gin.H{
-        "transaction_id":       req.TransactionID,
-        "risk_score":           riskResult.Score,
-        "risk_level":           riskResult.Level,
-        "reasons":              riskResult.Reasons,
-        "ai_triggered":         riskResult.AITriggered,
-        "ai_confidence":        riskResult.AIConfidence,
-        "ai_recommendation":    riskResult.AIRecommendation,
-        "ai_fraud_probability": riskResult.AIFraudProbability,
-        "ai_summary":           riskResult.AISummary,
-        "message":              "Transaction analyzed successfully",
-    })
-}
-```
-
-**Key point:** The route layer does NOT do any business logic. It only handles HTTP concerns (parsing, responding). All the actual risk logic lives in `services/`.
-
----
-
-### 4.4 `services/risk_engine.go` — The Scoring Brain
-
-This is the core of the system. It takes a `TransactionData` struct and returns a `RiskResult`.
-
-#### The Data Types
-
-```go
-// Input — what the route layer sends us
-type TransactionData struct {
-    UserID        string
-    TransactionID string
-    Amount        float64
-    Currency      string
-    IPAddress     string
-    DeviceID      string
-    Location      string
-}
-
-// Output — what we return to the route layer
-type RiskResult struct {
-    Score              int      // 0–100 integer
-    Level              string   // "LOW", "MEDIUM", or "HIGH"
-    Reasons            []string // human-readable list of why the score is what it is
-    AITriggered        bool     // was the AI called?
-    AIConfidence       float64  // how confident was the AI (0.0–1.0)
-    AISummary          string   // AI's one-sentence reasoning
-    AIRecommendation   string   // "APPROVE", "REVIEW", or "BLOCK"
-    AIFraudProbability float64  // AI's estimated fraud probability (0.0–1.0)
-}
-```
-
-#### The Scoring Rules
-
-Each rule produces a risk value between `0.0` and `1.0`. Each rule has a weight. **All weights sum to exactly 1.0**, so the final score is a true percentage.
-
-```go
-// Rule 1: Amount (35% of total score) — tiered, not binary
-switch {
-case tx.Amount > 500000:
-    amountRisk = 1.0   // full risk
-case tx.Amount > 100000:
-    amountRisk = 0.6   // high risk
-case tx.Amount > 50000:
-    amountRisk = 0.3   // moderate risk
-}
-
-// Rule 2: Currency (20%) — non-NGN = foreign = riskier
-if tx.Currency != "NGN" {
-    currencyRisk = 1.0
-}
-
-// Rule 3: Device ID (15%) — missing device = anonymous sender
-if tx.DeviceID == "" {
-    deviceRisk = 1.0
-}
-
-// Rule 4: IP Address (15%) — missing IP = untraceable
-if tx.IPAddress == "" {
-    ipRisk = 1.0
-}
-
-// Rule 5: Location (15%) — missing location = unverifiable origin
-if tx.Location == "" {
-    locationRisk = 1.0
-}
-
-// Final weighted score (0.35 + 0.20 + 0.15 + 0.15 + 0.15 = 1.0)
-score := (amountRisk * 0.35) +
-         (currencyRisk * 0.20) +
-         (deviceRisk * 0.15) +
-         (ipRisk * 0.15) +
-         (locationRisk * 0.15)
-
-finalScore := int(score * 100) // e.g. 0.55 → 55
-```
-
-#### The AI Gate
-
-After the rule-based score is calculated, the engine decides whether to call the AI:
-
-```go
-if finalScore >= 40 {
-    // Score is MEDIUM or HIGH — get AI's second opinion
-    aiTriggered = true
-    log.Printf("[AI GATE] Score=%d for txn=%s — calling Groq AI...", finalScore, tx.TransactionID)
-
-    result, err := AnalyzeTransaction(tx, finalScore)
-    if err != nil {
-        // AI failed — escalate to HIGH for safety, don't silently ignore
-        log.Printf("[AI ERROR] txn=%s: %v", tx.TransactionID, err)
-        level = "HIGH"
-        reasons = append(reasons, "AI analysis unavailable — escalated to HIGH for manual review")
-    } else {
-        // AI succeeded — let it influence the final level
-        switch result.RecommendedAction {
-        case "BLOCK":
-            level = "HIGH"
-        case "REVIEW":
-            if level == "LOW" { level = "MEDIUM" } // AI can upgrade, never downgrade
-        case "APPROVE":
-            // note the AI's opinion but keep rule-based level
-        }
-    }
+    riskResult := services.CalculateRisk(services.TransactionData{ ... })
+    c.JSON(200, gin.H{ "risk_score": riskResult.Score, ... })
 }
 ```
 
 ---
 
-### 4.5 `services/ai_service.go` — The Groq AI Integration
+### 4.4 `services/risk_engine.go`
 
-This file is responsible for sending transaction data to Groq's API and parsing the response.
+The scoring core. It produces a `RiskResult` from a `TransactionData` input.
 
-#### The Prompt Strategy
+#### Scoring Rules
 
-The AI is given two messages — a **system prompt** (its role and output rules) and a **user prompt** (the actual transaction data):
-
-```go
-systemPrompt := `You are a financial fraud detection AI for a Nigerian fintech platform.
-You MUST respond with ONLY a valid JSON object — no markdown, no explanation outside the JSON.
-The JSON must follow this exact schema:
-{
-  "fraud_probability": <float between 0.0 and 1.0>,
-  "recommended_action": <"APPROVE" | "REVIEW" | "BLOCK">,
-  "reasoning": <one concise sentence explaining your decision>,
-  "confidence": <float between 0.0 and 1.0>
-}`
-
-userPrompt := fmt.Sprintf(`Assess this transaction for fraud risk:
-Transaction ID : %s
-Amount         : %.2f %s
-Location       : %s
-Device ID      : %s
-IP Address     : %s
-Baseline Score : %d/100
-Respond with JSON only.`, tx.TransactionID, tx.Amount, tx.Currency, ...)
-```
-
-#### The HTTP Call
+Each rule produces a risk value from `0.0` to `1.0`. Weights sum exactly to **1.0**, so the final score is a true 0–100 percentage:
 
 ```go
-body := groqRequest{
-    Model:       "llama-3.3-70b-versatile", // current active Groq model
-    Temperature: 0.1,  // low = more deterministic output (important for JSON)
-    MaxTokens:   256,  // we only need a small JSON blob
-    Messages: []groqMessage{
-        {Role: "system", Content: systemPrompt},
-        {Role: "user", Content: userPrompt},
-    },
-}
-
-client := &http.Client{Timeout: 10 * time.Second}
-resp, err := client.Do(httpReq)
-```
-
-#### Parsing the Response Safely
-
-LLMs sometimes wrap their JSON in markdown code fences (` ```json ... ``` `). The code strips these before parsing:
-
-````go
-rawContent = strings.TrimPrefix(rawContent, "```json")
-rawContent = strings.TrimPrefix(rawContent, "```")
-rawContent = strings.TrimSuffix(rawContent, "```")
-rawContent = strings.TrimSpace(rawContent)
-
-var aiResult AIResult
-json.Unmarshal([]byte(rawContent), &aiResult)
-````
-
-It also validates the action field is one of the expected values:
-
-```go
-switch aiResult.RecommendedAction {
-case "APPROVE", "REVIEW", "BLOCK":
-    // valid — continue
-default:
-    return AIResult{}, fmt.Errorf("AI returned unexpected action: %q", aiResult.RecommendedAction)
-}
-```
-
----
-
-## 5. Bugs Found and Fixed
-
-### Bug 1 — 400 Bad Request on `/analyze`
-
-**Problem:** The `TransactionRequest` struct had `Timestamp` marked as `binding:"required"`:
-
-```go
-// BEFORE (broken)
-Timestamp string `json:"timestamp" binding:"required"`
-```
-
-The test JSON payload did not include a `timestamp` field. Gin's `ShouldBindJSON` failed validation and returned 400 immediately — before any business logic ran.
-
-**Fix:** Made `Timestamp` optional by removing the `binding:"required"` tag:
-
-```go
-// AFTER (fixed)
-Timestamp string `json:"timestamp"` // optional
-```
-
----
-
-### Bug 2 — Location field silently dropped
-
-**Problem:** The `TransactionRequest` struct had no `Location` field at all. Even though the client sent `"location": "Lagos, Nigeria"`, Gin silently ignored it. The `risk_engine.go` then always saw `tx.Location == ""` and always added a location risk penalty.
-
-**Fix:** Added `Location` to both the request struct and the mapping to `TransactionData`:
-
-```go
-// In TransactionRequest struct
-Location string `json:"location"` // added
-
-// In the handler, passing it through
-riskResult := services.CalculateRisk(services.TransactionData{
-    ...
-    Location: req.Location, // added
-})
-```
-
----
-
-### Bug 3 — Scoring weights exceeded 100%
-
-**Problem:** The original weights added up to **1.2 (120%)**, not 1.0:
-
-```go
-// BEFORE (broken — sums to 1.2)
-amountWeight   := 0.4
-currencyWeight := 0.2
-deviceWeight   := 0.2
-ipWeight       := 0.2
-locationWeight := 0.2
-// Total: 0.4 + 0.2 + 0.2 + 0.2 + 0.2 = 1.2
-```
-
-This meant the maximum possible score was 120, not 100. The score was not a true percentage.
-
-**Fix:** Rebalanced weights to sum to exactly 1.0:
-
-```go
-// AFTER (fixed — sums to 1.0)
-// Amount: 35%, Currency: 20%, Device: 15%, IP: 15%, Location: 15%
-score := (amountRisk * 0.35) +
-         (currencyRisk * 0.20) +
-         (deviceRisk * 0.15) +
-         (ipRisk * 0.15) +
-         (locationRisk * 0.15)
-// Total: 0.35 + 0.20 + 0.15 + 0.15 + 0.15 = 1.0 ✓
-```
-
----
-
-### Bug 4 — Deprecated Groq model
-
-**Problem:** The original code used `mixtral-8x7b-32768`, which Groq has deprecated. Calls to it return an API error, which was silently swallowed.
-
-```go
-// BEFORE (broken — model no longer exists on Groq)
-Model: "mixtral-8x7b-32768",
-```
-
-**Fix:** Updated to Groq's current recommended model:
-
-```go
-// AFTER (fixed)
-Model: "llama-3.3-70b-versatile",
-```
-
----
-
-### Bug 5 — AI errors were silently swallowed
-
-**Problem:** When the AI call failed (wrong model, network error, bad key), the original code did this:
-
-```go
-// BEFORE — error is caught but there's no logging
-result, err := AnalyzeTransaction(tx, finalScore)
-if err == nil {
-    aiResult = result
-} else {
-    level = "HIGH"
-    reasons = append(reasons, "AI unavailable: transaction blocked pending manual review")
-    aiResult.Confidence = 0
-}
-```
-
-There was no `log.Printf` anywhere. You had no way to know _why_ the AI wasn't working.
-
-**Fix:** Added explicit logging at every stage:
-
-```go
-// AFTER — every outcome is logged
-log.Printf("[AI GATE] Score=%d for txn=%s — calling Groq AI...", finalScore, tx.TransactionID)
-
-result, err := AnalyzeTransaction(tx, finalScore)
-if err != nil {
-    log.Printf("[AI ERROR] txn=%s: %v", tx.TransactionID, err) // ← tells you exactly what went wrong
-    level = "HIGH"
-    reasons = append(reasons, "AI analysis unavailable — escalated to HIGH for manual review")
-} else {
-    log.Printf("[AI OK] txn=%s confidence=%.2f action=%s", tx.TransactionID, result.Confidence, result.RecommendedAction)
-    aiResult = result
-}
-```
-
----
-
-## 6. Improvements Made
-
-### Tiered Amount Scoring
-
-**Before:** Amount was binary — either risky or not:
-
-```go
-// BEFORE — only one threshold
-if tx.Amount > 100000 {
-    amountRisk = 1.0
-}
-```
-
-**After:** Three tiers that reflect real-world risk gradation:
-
-```go
-// AFTER — graduated risk
+// Rule 1: Amount (35%) — tiered, not binary
 switch {
 case tx.Amount > 500000:
     amountRisk = 1.0   // extreme
@@ -575,63 +261,80 @@ case tx.Amount > 100000:
 case tx.Amount > 50000:
     amountRisk = 0.3   // moderate
 }
+
+// Rule 2: Currency (20%) — non-NGN = riskier foreign transaction
+if tx.Currency != "NGN" { currencyRisk = 1.0 }
+
+// Rule 3: Device ID (15%) — missing = anonymous sender
+if tx.DeviceID == "" { deviceRisk = 1.0 }
+
+// Rule 4: IP Address (15%) — missing = untraceable
+if tx.IPAddress == "" { ipRisk = 1.0 }
+
+// Rule 5: Location (15%) — missing = unverifiable origin
+if tx.Location == "" { locationRisk = 1.0 }
+
+// Final weighted score (0.35 + 0.20 + 0.15 + 0.15 + 0.15 = 1.0)
+score := (amountRisk * 0.35) + (currencyRisk * 0.20) +
+         (deviceRisk * 0.15) + (ipRisk * 0.15) + (locationRisk * 0.15)
+finalScore := int(score * 100)
 ```
 
----
-
-### AI Gate Lowered to 40
-
-**Before:** AI was only called at score ≥ 50 (HIGH territory). This meant MEDIUM-risk transactions never got AI analysis.
-
-**After:** AI is called at score ≥ 40, which covers all MEDIUM and HIGH transactions:
+#### AI Gate
 
 ```go
-if finalScore >= 40 { // was >= 50
-    // call AI
-}
-```
+if finalScore >= 40 {
+    aiTriggered = true
+    log.Printf("[AI GATE] Score=%d for txn=%s — calling Groq AI...", finalScore, tx.TransactionID)
 
----
-
-### AI Can Influence Final Risk Level
-
-**Before:** The AI result was stored but never actually changed the `level` variable. It was purely informational.
-
-**After:** The AI's `recommended_action` can upgrade the risk level:
-
-```go
-switch result.RecommendedAction {
-case "BLOCK":
-    level = "HIGH"                    // AI overrides to HIGH
-case "REVIEW":
-    if level == "LOW" {
-        level = "MEDIUM"              // AI upgrades LOW → MEDIUM
+    result, err := AnalyzeTransaction(tx, finalScore)
+    if err != nil {
+        log.Printf("[AI ERROR] txn=%s: %v", tx.TransactionID, err)
+        level = "HIGH"
+        reasons = append(reasons, "AI analysis unavailable — escalated to HIGH for manual review")
+    } else {
+        switch result.RecommendedAction {
+        case "BLOCK":
+            level = "HIGH"
+        case "REVIEW":
+            if level == "LOW" { level = "MEDIUM" } // AI can upgrade, never downgrade
+        }
     }
-case "APPROVE":
-    // AI agrees it's safe, but we don't downgrade the rule-based level
 }
 ```
 
 ---
 
-### Structured Prompting with System + User Roles
+### 4.5 `services/ai_service.go`
 
-**Before:** A single combined prompt was sent as a `user` message. This gives the model less context about its role.
+Responsible for calling Groq's API and parsing the structured response.
 
-**After:** Split into a `system` message (role + output format) and a `user` message (transaction data). This produces more reliable, consistent JSON output:
+#### Prompt Strategy
+
+Two-role prompting ensures reliable, deterministic JSON output from the LLM:
 
 ```go
-Messages: []groqMessage{
-    {Role: "system", Content: systemPrompt}, // role definition
-    {Role: "user",   Content: userPrompt},   // transaction data
-},
+systemPrompt := `You are a financial fraud detection AI for a Nigerian fintech platform.
+You MUST respond with ONLY a valid JSON object — no markdown, no explanation outside the JSON.
+The JSON must follow this exact schema:
+{
+  "fraud_probability": <float between 0.0 and 1.0>,
+  "recommended_action": <"APPROVE" | "REVIEW" | "BLOCK">,
+  "reasoning": <one concise sentence>,
+  "confidence": <float between 0.0 and 1.0>
+}`
+
+userPrompt := fmt.Sprintf(`Assess this transaction for fraud risk:
+Transaction ID : %s
+Amount         : %.2f %s
+Location       : %s
+Baseline Score : %d/100
+Respond with JSON only.`, tx.TransactionID, tx.Amount, tx.Currency, tx.Location, score)
 ```
 
----
+#### Markdown Fence Stripping
 
-### Markdown Fence Stripping
-
-LLMs sometimes wrap their JSON output in markdown code fences even when told not to. Added defensive stripping:
+LLMs sometimes wrap JSON in code fences even when instructed not to. The parser defensively strips them:
 
 ````go
 rawContent = strings.TrimPrefix(rawContent, "```json")
@@ -642,102 +345,529 @@ rawContent = strings.TrimSpace(rawContent)
 
 ---
 
-### Full AI Fields Exposed in API Response
+## 5. Face Service — Deep Dive
 
-**Before:** The response only returned `ai_confidence`. The AI's recommendation and fraud probability were computed but never sent back to the caller.
+The face service is a self-contained Go application in `asguard-face/main.go`. It uses a single global `face.Recognizer` instance (loaded once at startup) shared across all request handlers.
 
-**After:** All AI fields are returned:
+### 5.1 Overview & Startup
 
 ```go
-c.JSON(200, gin.H{
-    "transaction_id":       req.TransactionID,
-    "risk_score":           riskResult.Score,
-    "risk_level":           riskResult.Level,
-    "reasons":              riskResult.Reasons,
-    "ai_triggered":         riskResult.AITriggered,         // was AI called?
-    "ai_confidence":        riskResult.AIConfidence,        // 0.0–1.0
-    "ai_recommendation":    riskResult.AIRecommendation,    // APPROVE/REVIEW/BLOCK
-    "ai_fraud_probability": riskResult.AIFraudProbability,  // 0.0–1.0
-    "ai_summary":           riskResult.AISummary,           // one-sentence reasoning
-    "message":              "Transaction analyzed successfully",
-})
+var recognizer *face.Recognizer  // Global, initialized once
+var apiKeys map[string]bool       // Parsed from API_KEYS env var
+
+func main() {
+    modelsPath := getEnv("MODELS_PATH", "./models")
+    apiKeyList := getEnv("API_KEYS", "dev-key-123")
+
+    // Parse comma-separated API keys into a lookup map
+    apiKeys = make(map[string]bool)
+    for _, key := range strings.Split(apiKeyList, ",") {
+        apiKeys[strings.TrimSpace(key)] = true
+    }
+
+    // Load dlib models — this is expensive, done once at startup
+    var err error
+    recognizer, err = face.NewRecognizer(modelsPath)
+    if err != nil {
+        log.Fatalf("Failed to load face models from %s: %v", modelsPath, err)
+    }
+    defer recognizer.Close()
+
+    log.Printf("Loaded face models from %s", modelsPath)
+
+    gin.SetMode(gin.ReleaseMode)
+    r := gin.New()
+    r.Use(gin.Recovery())
+    r.Use(requestIDMiddleware())
+    r.Use(cors.New(...))      // CORS — added 2026-03-03
+    r.Use(authMiddleware())
+
+    r.POST("/v1/analyze", handleAnalyze)
+    r.POST("/v1/compare", handleCompare)
+    r.GET("/health", handleHealth)
+
+    port := getEnv("PORT", "8082")
+    r.Run(":" + port)
+}
+```
+
+**Why load models once?** Loading dlib CNN models (especially the ResNet face recognizer) takes several seconds and significant memory. Loading them once at boot and reusing the global `recognizer` across all requests is the standard pattern — it would be a critical performance bug to initialize it per-request.
+
+---
+
+### 5.2 CORS Middleware _(New — 2026-03-03)_
+
+**Why it was added:** Without CORS headers, browsers block cross-origin requests to the face service. Any frontend or web-based SDK calling the service directly would receive a CORS error.
+
+The middleware is registered before `authMiddleware` so that `OPTIONS` preflight requests from browsers can succeed even before auth is checked:
+
+```go
+r.Use(cors.New(cors.Config{
+    AllowOrigins:     []string{"*"},  // Allow all origins — set to your frontend URL in production
+    AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+    AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+    ExposeHeaders:    []string{"Content-Length"},
+    AllowCredentials: true,
+}))
+```
+
+| Config Key         | Value                    | Reason                                                                            |
+| ------------------ | ------------------------ | --------------------------------------------------------------------------------- |
+| `AllowOrigins`     | `["*"]`                  | Permissive during development. Restrict to specific domains in production.        |
+| `AllowMethods`     | `GET, POST, OPTIONS`     | Covers health check, data endpoints, and browser preflights.                      |
+| `AllowHeaders`     | includes `Authorization` | Critical — without this, `Authorization: Bearer <key>` is blocked by the browser. |
+| `AllowCredentials` | `true`                   | Required if cookies or auth headers are sent cross-origin.                        |
+
+> ⚠️ **Production Note:** Replace `AllowOrigins: ["*"]` with your specific frontend domain (e.g., `["https://app.yourdomain.com"]`) to prevent unauthorized cross-origin access.
+
+---
+
+### 5.3 Auth Middleware
+
+Validates the `Authorization: Bearer <token>` header against the parsed `apiKeys` map. The `/health` route is explicitly exempt:
+
+```go
+func authMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        if c.Request.URL.Path == "/health" {
+            c.Next()
+            return
+        }
+
+        key := c.GetHeader("Authorization")
+        key = strings.TrimPrefix(key, "Bearer ") // strip prefix if present
+
+        if !apiKeys[key] {
+            c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+                "success": false,
+                "error":   "Invalid or missing API key",
+            })
+            return
+        }
+        c.Next()
+    }
+}
+```
+
+**Multiple key support:** `API_KEYS=key-1,key-2,key-3` — all keys are valid simultaneously. This enables key rotation without downtime (add a new key, deploy, retire the old key).
+
+---
+
+### 5.4 Request ID Middleware
+
+Every request gets a unique UUID injected into the Gin context and returned as a response header:
+
+```go
+func requestIDMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        requestID := uuid.New().String()
+        c.Set("request_id", requestID)        // available to handlers via c.GetString("request_id")
+        c.Header("X-Request-ID", requestID)   // returned to caller for tracing
+        c.Next()
+    }
+}
+```
+
+This enables log correlation across distributed systems. Every log line inside a handler prefixes with `[requestID]`, making it trivial to trace a single request through the logs even under high concurrency.
+
+---
+
+### 5.5 Routes
+
+```
+GET  /health         → handleHealth      (no auth)
+POST /v1/analyze     → handleAnalyze     (auth required)
+POST /v1/compare     → handleCompare     (auth required)
 ```
 
 ---
 
-## 7. How to Test the API
+### 5.6 `handleAnalyze` — Embedding Extraction
 
-### Step 1 — Start the server
+Accepts a base64 image, decodes it, runs dlib face detection, and returns a 128-dimension embedding vector:
+
+```go
+func handleAnalyze(c *gin.Context) {
+    start := time.Now()
+    requestID := c.GetString("request_id")
+
+    var req AnalyzeRequest
+    if err := c.ShouldBindJSON(&req); err != nil { /* 400 */ return }
+
+    // 1. Decode base64 → raw image bytes
+    imgBytes, err := decodeBase64ToBytes(req.Image)
+
+    // 2. Optionally decode to image.Image for quality checks
+    var img image.Image
+    if req.QualityChecks {
+        img, _, err = image.Decode(bytes.NewReader(imgBytes))
+    }
+
+    // 3. Run dlib face detection on raw bytes
+    faces, err := recognizer.Recognize(imgBytes)
+
+    // 4. Guard: exactly one face required
+    if len(faces) == 0 { /* "No face detected" */ return }
+    if len(faces) > 1  { /* "Multiple faces detected" */ return }
+
+    // 5. Extract 128D descriptor
+    embedding := faces[0].Descriptor[:]
+
+    // 6. Optional quality scoring
+    if req.QualityChecks && img != nil {
+        qualityScore, sharpness, brightness, faceSize, warnings =
+            checkQuality(img, faces[0].Rectangle)
+    }
+
+    c.JSON(http.StatusOK, AnalyzeResponse{
+        Success:          true,
+        FaceDetected:     true,
+        Embedding:        embedding,
+        QualityScore:     qualityScore,
+        Sharpness:        sharpness,
+        Brightness:       brightness,
+        FaceSizeRatio:    faceSize,
+        Warnings:         warnings,
+        ProcessingTimeMs: time.Since(start).Milliseconds(),
+    })
+}
+```
+
+**Key design choice — raw bytes vs file path:** `recognizer.Recognize(imgBytes)` accepts raw JPEG/PNG bytes directly. This avoids writing temporary files to disk, which would be slow and require cleanup. The recognizer decodes the image internally using the `libjpeg62-turbo` library.
+
+---
+
+### 5.7 `handleCompare` — Face Similarity
+
+Takes a probe image and a pre-computed 128D reference embedding. Extracts the probe's embedding, computes Euclidean distance, and returns a match decision:
+
+```go
+func handleCompare(c *gin.Context) {
+    // Validate reference embedding is exactly 128 dimensions
+    if len(req.ReferenceEmbedding) != 128 { /* error */ return }
+
+    // Extract probe embedding (same pipeline as handleAnalyze)
+    faces, err := recognizer.Recognize(imgBytes)
+    // ... single-face guards ...
+
+    // Euclidean distance comparison
+    var refArray, probeArray [128]float32
+    copy(refArray[:], req.ReferenceEmbedding)
+    probeArray = faces[0].Descriptor
+
+    threshold := float32(0.6)  // default; caller can override
+    if req.Threshold != nil { threshold = *req.Threshold }
+
+    match, confidence, distance := compareEmbeddings(refArray, probeArray, threshold)
+}
+```
+
+#### The Distance Formula
+
+```go
+func compareEmbeddings(ref, probe [128]float32, threshold float32) (match bool, confidence, distance float32) {
+    var sum float32
+    for i := 0; i < 128; i++ {
+        diff := ref[i] - probe[i]
+        sum += diff * diff
+    }
+    distance = float32(math.Sqrt(float64(sum)))  // Euclidean distance
+
+    // Normalize to [0, 1] confidence score
+    // 0 distance   → 1.0 confidence (perfect match)
+    // threshold    → 0.0 confidence (at the boundary)
+    // > threshold  → 0.0 confidence (no match)
+    if distance >= threshold {
+        confidence = 0
+    } else {
+        confidence = 1 - (distance / threshold)
+    }
+    match = distance < threshold
+    return
+}
+```
+
+**About the threshold:** The default of `0.6` is the standard dlib recommendation for its ResNet face recognition model. A smaller threshold (e.g., `0.4`) is more strict (fewer false positives, more false negatives). A larger threshold is more permissive. Callers can override it per-request.
+
+---
+
+### 5.8 Image Quality Scoring
+
+When `quality_checks: true` is set, the service evaluates the image before accepting the embedding:
+
+```go
+func checkQuality(img image.Image, faceRect image.Rectangle) (score, sharpness, brightness, faceSize float32, warnings []string) {
+
+    // Face size ratio: face area / total image area
+    faceSize = float32(faceArea) / float32(imgArea)
+    if faceSize < 0.15 { warnings = append(warnings, "face_too_small") }
+
+    // Brightness: average luminance across all pixels
+    brightness = computeAverageBrightness(img)
+    if brightness < 60  { warnings = append(warnings, "too_dark") }
+    if brightness > 200 { warnings = append(warnings, "too_bright") }
+
+    // Sharpness: Laplacian variance (gradient magnitude sampled every 4px)
+    sharpness = calculateSharpness(img)
+    if sharpness < 100 { warnings = append(warnings, "too_blurry") }
+
+    // Overall score: 1.0 if clean, 0.7 if any warnings
+    score = 1.0
+    if len(warnings) > 0 { score = 0.7 }
+    return
+}
+```
+
+| Warning          | Trigger            | Meaning                                                        |
+| ---------------- | ------------------ | -------------------------------------------------------------- |
+| `face_too_small` | `faceSize < 0.15`  | Face occupies less than 15% of the image — too far from camera |
+| `too_dark`       | `brightness < 60`  | Poor lighting — recognition accuracy degraded                  |
+| `too_bright`     | `brightness > 200` | Overexposed — facial features washed out                       |
+| `too_blurry`     | `sharpness < 100`  | Motion blur or out-of-focus — embeddings unreliable            |
+
+The sharpness calculation uses a **Sobel gradient approximation** sampled at every 4th pixel for performance — a full pixel iteration on a high-resolution image would be unacceptably slow:
+
+```go
+// Sample every 4th pixel for performance
+for y := bounds.Min.Y + 1; y < bounds.Max.Y-1; y += 4 {
+    for x := bounds.Min.X + 1; x < bounds.Max.X-1; x += 4 {
+        gx := grayDiff(img, x+1, y, x-1, y)   // horizontal gradient
+        gy := grayDiff(img, x, y+1, x, y-1)   // vertical gradient
+        mag := math.Sqrt(gx*gx + gy*gy)
+        sum += mag; sumSq += mag*mag; count++
+    }
+}
+variance := (sumSq / float64(count)) - (mean * mean)
+normalized := variance / 1000.0  // cap at 1.0
+```
+
+---
+
+## 6. Dockerfile — Multi-Stage Build _(New — 2026-03-03)_
+
+The `asguard-face/Dockerfile` was redesigned as a **two-stage build**. This is one of the most important Docker optimizations available for CGO-dependent Go applications.
+
+```dockerfile
+# ---- Builder stage ----
+FROM golang:1.25-bookworm AS builder
+
+# Install C/C++ BUILD dependencies (includes headers, static libs, etc.)
+RUN apt-get update && apt-get install -y \
+    libdlib-dev \
+    libatlas-base-dev \
+    libjpeg62-turbo-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download          # Download dependencies first (layer cache)
+COPY main.go .
+RUN CGO_ENABLED=1 GOOS=linux go build -o face-service main.go
+
+
+# ---- Runtime stage ----
+FROM debian:bookworm-slim    # Minimal base — no Go toolchain, no dev headers
+
+# Install RUNTIME ONLY libraries (no -dev packages, no headers)
+RUN apt-get update && apt-get install -y \
+    libdlib19.1 \            # dlib shared library (runtime only)
+    libopenblas0 \           # BLAS math (dlib dependency)
+    liblapack3 \             # LAPACK linear algebra (dlib dependency)
+    libjpeg62-turbo \        # JPEG decoding (runtime only)
+    ca-certificates \        # TLS root certificates
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /app/face-service /app/face-service   # Copy only the binary
+
+CMD ["/app/face-service"]
+```
+
+### Why Multi-Stage?
+
+|                        | Single Stage                    | Multi-Stage                    |
+| ---------------------- | ------------------------------- | ------------------------------ |
+| Base image             | `golang:1.25-bookworm` (~900MB) | `debian:bookworm-slim` (~80MB) |
+| Dev tools in runtime   | Yes (gcc, make, Go toolchain)   | **No**                         |
+| `-dev` header packages | Yes                             | **No**                         |
+| Final image size       | ~2.5GB                          | **~300MB**                     |
+| Attack surface         | Large                           | **Minimal**                    |
+
+**Stage 1 (builder):** Installs all C development headers and the full Go toolchain. Compiles the binary with `CGO_ENABLED=1` so it links against the native dlib shared library.
+
+**Stage 2 (runtime):** Starts fresh from a slim Debian base. Installs only the runtime `.so` shared libraries that the compiled binary needs at execution time. Copies just the compiled binary from Stage 1. The result is a production-grade minimal image.
+
+---
+
+## 7. Docker Compose — Multi-Service Orchestration
+
+The root `docker-compose.yml` brings up the entire platform:
+
+```yaml
+version: "3.8"
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - ASGUARD_API_KEY=devsecret
+      - PORT=8081
+
+  asguard-face:
+    build: ./asguard-face # Uses the multi-stage Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - MODELS_PATH=/app/models
+      - API_KEYS=${FACE_API_KEYS:-dev-key-123} # Falls back to dev-key-123
+    volumes:
+      - ./models:/app/models:ro # Mount models as read-only
+    networks:
+      - asguard-network
+
+networks:
+  asguard-network:
+    driver: bridge
+```
+
+**Key design decisions:**
+
+- `./models:/app/models:ro` — The dlib model files (~100MB each) are mounted from the host, not baked into the image. This keeps the image lean and allows model updates without a full Docker rebuild.
+- `API_KEYS=${FACE_API_KEYS:-dev-key-123}` — Docker Compose reads `FACE_API_KEYS` from the host environment (or a `.env` file). The `:-dev-key-123` syntax provides a safe dev fallback so the service always starts even without an `.env` file.
+- Both services share `asguard-network`, enabling them to call each other by service name (e.g., `http://asguard-face:8082`) if needed in the future.
+
+---
+
+## 8. Backend — Bugs Fixed & Improvements
+
+### Bug 1 — 400 Bad Request on `/analyze`
+
+`Timestamp` was marked `binding:"required"` but clients didn't send it. **Fix:** Made it optional.
+
+### Bug 2 — Location field silently dropped
+
+`Location` wasn't in `TransactionRequest`, so Gin discarded it. The risk engine always penalized missing location. **Fix:** Added `Location` to both the struct and the `TransactionData` mapping.
+
+### Bug 3 — Scoring weights exceeded 100%
+
+Weights summed to `1.2`, so max score was 120, not 100. **Fix:** Rebalanced to `0.35 + 0.20 + 0.15 + 0.15 + 0.15 = 1.0`.
+
+### Bug 4 — Deprecated Groq model
+
+`mixtral-8x7b-32768` was removed by Groq. **Fix:** Updated to `llama-3.3-70b-versatile`.
+
+### Bug 5 — AI errors silently swallowed
+
+AI failures produced no log output and the caller received a generic response. **Fix:** Added `log.Printf` at every stage: `[AI GATE]`, `[AI ERROR]`, `[AI OK]`.
+
+### Improvement — Tiered Amount Scoring
+
+Amount was binary (`> 100k` = full risk). **Fix:** Added three tiers: `> 50k` = 0.3, `> 100k` = 0.6, `> 500k` = 1.0.
+
+### Improvement — AI Gate at 40 (was 50)
+
+AI was only triggered at MEDIUM/HIGH boundary (50). Lowered to 40 so borderline MEDIUM transactions also get AI analysis.
+
+### Improvement — AI Influences Final Risk Level
+
+AI recommendation now actively upgrades the risk level (`BLOCK` → `HIGH`, `REVIEW` → upgrade `LOW` to `MEDIUM`). Previously it was stored but never applied.
+
+---
+
+## 9. Face Service — Changes on 2026-03-03
+
+### CORS Middleware Added
+
+**Problem:** Any web browser calling `/v1/analyze` or `/v1/compare` directly would receive a CORS policy error because the server returned no `Access-Control-Allow-Origin` header.
+
+**Solution:** Integrated `github.com/gin-contrib/cors` and registered it as the first middleware in the chain (before auth), so `OPTIONS` preflight requests succeed:
+
+```go
+import "github.com/gin-contrib/cors"
+
+r.Use(cors.New(cors.Config{
+    AllowOrigins:     []string{"*"},
+    AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+    AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+    ExposeHeaders:    []string{"Content-Length"},
+    AllowCredentials: true,
+}))
+```
+
+**Why `Authorization` must be in `AllowHeaders`:** The browser's CORS preflight check (`OPTIONS`) includes a list of the headers the actual request will send. If `Authorization` is not in the server's `Access-Control-Allow-Headers` response, the browser aborts the request before it reaches the server — the `Bearer` token is never sent, and clients receive a CORS error instead of a 401.
+
+### Dockerfile Converted to Multi-Stage Build
+
+**Problem:** The original single-stage Dockerfile used `golang:1.25-bookworm` as its runtime base, bundling the entire Go compiler, build tools, and `-dev` header packages (~2.5GB) into the production image.
+
+**Solution:** Separated build and runtime into two stages. Final production image is `debian:bookworm-slim` containing only the compiled binary and its runtime `.so` dependencies (~300MB reduction).
+
+---
+
+## 10. How to Test Both APIs
+
+### Start Everything
 
 ```bash
-cd backend
-go run main.go
+# From the project root
+docker compose up --build
 ```
 
-### Step 2 — Health check (no API key needed)
+### Test Backend
 
-```
-GET http://localhost:8081/health
-```
+```bash
+# Health check (no key needed)
+curl http://localhost:8081/health
 
-Expected response:
-
-```json
-{ "status": "asguard health running" }
-```
-
-### Step 3 — Analyze a transaction
-
-```
-POST http://localhost:8081/analyze
-Header: x-api-key: supersecret123
-Content-Type: application/json
+# Analyze a transaction
+curl -X POST http://localhost:8081/analyze \
+  -H "x-api-key: devsecret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "u1", "transaction_id": "t1",
+    "amount": 250000, "currency": "USD",
+    "ip_address": "1.2.3.4", "device_id": "d1",
+    "location": "Lagos, Nigeria"
+  }'
 ```
 
-Body:
+### Test Face Service
 
-```json
-{
-  "user_id": "user_123",
-  "transaction_id": "txn_456",
-  "amount": 250000,
-  "currency": "USD",
-  "ip_address": "192.168.1.5",
-  "device_id": "device_789",
-  "location": "Lagos, Nigeria"
-}
+```bash
+# Health check (no key needed)
+curl http://localhost:8082/health
+
+# Extract embedding from an image
+curl -X POST http://localhost:8082/v1/analyze \
+  -H "Authorization: Bearer dev-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image": "<base64-encoded-jpeg>",
+    "quality_checks": true
+  }'
+
+# Compare probe image to reference embedding
+curl -X POST http://localhost:8082/v1/compare \
+  -H "Authorization: Bearer dev-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "probe_image": "<base64-encoded-jpeg>",
+    "reference_embedding": [0.023, -0.14, ...],
+    "threshold": 0.6
+  }'
 ```
 
-Expected response (with AI triggered):
+### Score Breakdown Reference (Backend)
 
-```json
-{
-  "transaction_id": "txn_456",
-  "risk_score": 41,
-  "risk_level": "MEDIUM",
-  "reasons": [
-    "High transaction amount (>100k)",
-    "Foreign currency transaction (USD)",
-    "AI recommends REVIEW: Large USD transaction from Lagos warrants manual review"
-  ],
-  "ai_triggered": true,
-  "ai_confidence": 0.85,
-  "ai_recommendation": "REVIEW",
-  "ai_fraud_probability": 0.45,
-  "ai_summary": "Large USD transaction from Lagos warrants manual review",
-  "message": "Transaction analyzed successfully"
-}
-```
-
-### Score Breakdown for the Test Payload
-
-| Rule       | Value         | Risk | Weight | Contribution |
-| ---------- | ------------- | ---- | ------ | ------------ |
-| Amount     | 250,000 USD   | 0.6  | 35%    | 21 pts       |
-| Currency   | USD (foreign) | 1.0  | 20%    | 20 pts       |
-| Device ID  | present       | 0.0  | 15%    | 0 pts        |
-| IP Address | present       | 0.0  | 15%    | 0 pts        |
-| Location   | present       | 0.0  | 15%    | 0 pts        |
-| **Total**  |               |      |        | **41 pts**   |
-
-Score = 41 → **MEDIUM** → AI is triggered (≥ 40 threshold)
+| Rule       | Example Value | Risk | Weight | Contribution                       |
+| ---------- | ------------- | ---- | ------ | ---------------------------------- |
+| Amount     | 250,000 USD   | 0.6  | 35%    | 21 pts                             |
+| Currency   | USD (foreign) | 1.0  | 20%    | 20 pts                             |
+| Device ID  | present       | 0.0  | 15%    | 0 pts                              |
+| IP Address | present       | 0.0  | 15%    | 0 pts                              |
+| Location   | present       | 0.0  | 15%    | 0 pts                              |
+| **Total**  |               |      |        | **41 pts → MEDIUM → AI triggered** |

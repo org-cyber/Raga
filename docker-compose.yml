@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      - ASGUARD_API_KEY=devsecret
+      - PORT=8081
+    volumes:
+      - ./backend:/app
+    command: ["go", "run", "main.go"]
+
+    
+  asguard-face:
+    build: ./asguard-face
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - MODELS_PATH=/app/models
+      - API_KEYS=${FACE_API_KEYS:-dev-key-123}
+    volumes:
+      - ./models:/app/models:ro
+    networks:
+      - asguard-network
+
+networks:
+  asguard-network:
+    driver: bridge
