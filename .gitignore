@@ -21,3 +21,5 @@ config/asguard.json
 vendor/
 bin/
 *.test
+.npmrc 
+.pypirc 
