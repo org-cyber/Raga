@@ -16,10 +16,10 @@ func APIKeyAuth() gin.HandlerFunc {
 
 		//get api key from request header
 		apikey := c.GetHeader("x-api-key")
-		fmt.Println("postman sent:", apikey)
+
 		//get the expected api key from the env variable
 		expectedKey := os.Getenv("ASGUARD_API_KEY")
-		fmt.Println("the program is looking for", expectedKey)
+		fmt.Println("checking request against configured API key")
 
 		//error handeling to check if the api key is corect or not even there
 		if apikey == "" || apikey != expectedKey {
